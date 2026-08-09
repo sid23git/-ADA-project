@@ -143,19 +143,55 @@ else:
             )
 
             # ─── Results Tabs ─────────────────────────────
-            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+                "🧠 Hypotheses",
                 "📊 EDA",
                 "🧹 Cleaning",
                 "🤖 ML Results",
                 "💡 Explanation",
+                "✅ Validation",
                 "📄 Final Report",
                 "🔍 Audit Trail"
             ])
 
-            # Tab 1 — EDA
+            # Tab 1 — Hypotheses (NEW in v3.0)
             with tab1:
+                st.subheader("🧠 Hypotheses — Formed Before Analysis")
+                st.markdown(
+                    "These hypotheses were generated **before** any "
+                    "analysis ran — based only on column names and types. "
+                    "This mimics how a real scientist thinks."
+                )
+
+                hypotheses = state.get("hypotheses" or {})
+
+                if not hypotheses:
+                    st.warning("Hypothesis agent was skipped.")
+                else:
+                    st.info(f"**Dataset identified as:** "
+                            f"{hypotheses.get('dataset_type', 'N/A')}")
+
+                    st.markdown(f"**Analysis strategy:** "
+                                f"{hypotheses.get('analysis_strategy', 'N/A')}")
+
+                    st.markdown("**Generated Hypotheses:**")
+                    for h in hypotheses.get("hypotheses", []):
+                        confidence_color = (
+                            "🟢" if h.get("confidence") == "high"
+                            else "🟡" if h.get("confidence") == "medium"
+                            else "🔴"
+                        )
+                        with st.expander(
+                                f"{confidence_color} {h['id']} — {h['hypothesis']}"
+                        ):
+                            st.markdown(f"**Confidence:** {h.get('confidence', 'N/A')}")
+                            st.markdown(f"**Reasoning:** {h.get('reasoning', 'N/A')}")
+                            st.markdown(f"**Expected evidence:** "
+                                        f"{h.get('expected_evidence', 'N/A')}")
+            # Tab 2 — EDA
+            with tab2:
                 st.subheader("Exploratory Data Analysis")
-                eda_stats = state.get("eda_stats", {})
+                eda_stats = state.get("eda_stats") or {}
 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -178,10 +214,10 @@ else:
                 st.markdown("**AI EDA Report**")
                 st.markdown(state.get("eda_report", ""))
 
-            # Tab 2 — Cleaning
-            with tab2:
+            # Tab 3 — Cleaning
+            with tab3:
                 st.subheader("Data Cleaning")
-                strategy = state.get("cleaning_strategy", {})
+                strategy = state.get("cleaning_strategy") or {}
 
                 st.markdown("**AI Reasoning**")
                 st.info(strategy.get("reasoning", "N/A"))
@@ -208,10 +244,10 @@ else:
                     )
                     st.dataframe(strat_df, use_container_width=True)
 
-            # Tab 3 — ML Results
-            with tab3:
+            # Tab 4 — ML Results
+            with tab4:
                 st.subheader("Machine Learning Results")
-                ml = state.get("ml_results", {})
+                ml = state.get("ml_results") or {}
                 interp = ml.get("interpretation", {})
 
                 col1, col2 = st.columns(2)
@@ -237,10 +273,10 @@ else:
                     st.markdown("**Next Steps**")
                     st.success(interp.get("recommendation"))
 
-            # Tab 4 — Explanation
-            with tab4:
+            # Tab 5 — Explanation
+            with tab5:
                 st.subheader("Model Explanation (SHAP)")
-                explain = state.get("explain_results", {})
+                explain = state.get("explain_results" or {})
                 exp_interp = explain.get("interpretation", {})
 
                 if not explain:
@@ -277,8 +313,71 @@ else:
                         st.markdown("**Business Insight**")
                         st.success(exp_interp.get("business_insight"))
 
-            # Tab 5 — Final Report
-            with tab5:
+            # Tab 6 — Validation (NEW in v3.0)
+            with tab6:
+                st.subheader("✅ Hypothesis Validation Results")
+                st.markdown(
+                    "Each hypothesis was tested against the actual "
+                    "findings from EDA, ML, and SHAP analysis."
+                )
+
+                validation = state.get("validation_results") or {}
+
+                if not validation:
+                    st.warning("Validation agent was skipped.")
+                else:
+                    # Summary metrics
+                    results = validation.get("validation_results", [])
+                    confirmed = sum(1 for v in results
+                                    if v.get("verdict") == "CONFIRMED")
+                    rejected = sum(1 for v in results
+                                   if v.get("verdict") == "REJECTED")
+                    inconclusive = sum(1 for v in results
+                                       if v.get("verdict") == "INCONCLUSIVE")
+
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("✅ Confirmed", confirmed)
+                    col2.metric("❌ Rejected", rejected)
+                    col3.metric("⚠️ Inconclusive", inconclusive)
+
+                    st.divider()
+
+                    # Individual results
+                    for v in results:
+                        verdict = v.get("verdict", "")
+                        icon = ("✅" if verdict == "CONFIRMED"
+                                else "❌" if verdict == "REJECTED"
+                        else "⚠️")
+                        color = ("success" if verdict == "CONFIRMED"
+                                 else "error" if verdict == "REJECTED"
+                        else "warning")
+
+                        with st.expander(
+                                f"{icon} {v.get('id')} — {verdict}: "
+                                f"{v.get('hypothesis', '')[:80]}..."
+                        ):
+                            if color == "success":
+                                st.success(f"**Evidence:** {v.get('evidence', 'N/A')}")
+                            elif color == "error":
+                                st.error(f"**Evidence:** {v.get('evidence', 'N/A')}")
+                            else:
+                                st.warning(f"**Evidence:** {v.get('evidence', 'N/A')}")
+                            st.markdown(f"**Insight:** {v.get('insight', 'N/A')}")
+
+                    st.divider()
+                    st.markdown("**Overall Summary**")
+                    st.info(validation.get("overall_summary", "N/A"))
+
+                    if validation.get("most_surprising"):
+                        st.markdown("**Most Surprising Finding**")
+                        st.success(validation.get("most_surprising"))
+
+                    if validation.get("scientific_contribution"):
+                        st.markdown("**Scientific Contribution**")
+                        st.markdown(validation.get("scientific_contribution"))
+
+            # Tab 7 — Final Report
+            with tab7:
                 st.subheader("Final Report")
                 report = state.get("final_report", "")
                 st.markdown(report)
@@ -290,8 +389,8 @@ else:
                     mime="text/plain"
                 )
 
-            # Tab 6 — Audit Trail (NEW in v2.0)
-            with tab6:
+            # Tab 7 — Audit Trail (NEW in v2.0)
+            with tab7:
                 st.subheader("🔍 Audit Trail")
                 st.markdown(
                     "Every decision made by every agent — "
