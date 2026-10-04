@@ -2,9 +2,9 @@
 Tests for the statistical validation path.
 
 Everything here runs without an API key, a network call, or Streamlit — that is
-the point of keeping the maths in modules that never import utils.llm.
+the point of keeping the maths in modules that never import ada.llm.
 
-Run with `python tests/test_stat_tests.py` (pytest is not a project dependency,
+Run with `python tests/test_stats.py` (pytest is not a project dependency,
 but the test functions are pytest-compatible if you have it).
 """
 
@@ -18,9 +18,9 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import effect_sizes as es
-from utils.hypothesis_schema import ClaimType, Direction, TestSpec, Verdict
-from utils.stat_tests import (
+from ada.stats import effect_sizes as es
+from ada.stats.hypothesis_schema import ClaimType, Direction, TestSpec, Verdict
+from ada.stats.stat_tests import (
     benjamini_hochberg,
     decide_verdict,
     holm_bonferroni,
@@ -38,11 +38,11 @@ def approx(a, b, tol=1e-3):
 
 def test_stat_tests_never_imports_the_llm():
     """
-    If utils/stat_tests.py could reach utils.llm, "the verdict is computed in
+    If ada/stats/stat_tests.py could reach ada.llm, "the verdict is computed in
     code" would be a convention rather than a guarantee. Enforce it.
     """
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "utils", "stat_tests.py")
+                        "ada", "stats", "stat_tests.py")
     tree = ast.parse(open(path, encoding="utf-8").read())
     imported = set()
     for node in ast.walk(tree):

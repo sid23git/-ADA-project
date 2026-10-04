@@ -1,10 +1,10 @@
-import json
+"""SHAP explanations of the model train_models selected — pure computation."""
+
 import os
 import warnings
 
 import numpy as np
 import pandas as pd
-from dotenv import load_dotenv
 
 warnings.filterwarnings('ignore')
 
@@ -17,13 +17,8 @@ from sklearn.pipeline import Pipeline
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from pydantic import BaseModel, ConfigDict, Field
 
-from agents.ml_agent import build_model, prepare_features, split_data
-from utils.llm import call_llm_json
-
-load_dotenv()
-
+from ada.ml.modeling import build_model, decide_problem_type, prepare_features, split_data
 
 # The estimator class each best_model_name is expected to produce. This is the
 # single source of truth for both "can we explain this model?" and the
@@ -93,7 +88,6 @@ def train_best_model(df: pd.DataFrame, target_col: str,
 
 
 def compute_shap_values(model, X_train, X_test):
-    print("Computing SHAP values...")
     if isinstance(model, (LogisticRegression, LinearRegression)):
         explainer = shap.LinearExplainer(model, X_train)
     else:
@@ -106,10 +100,6 @@ def compute_shap_values(model, X_train, X_test):
         shap_values = np.stack(shap_values, axis=-1)
 
     return explainer, shap_values
-
-
-OUTPUT_DIR = "outputs"
-SHAP_PLOT_PATH = os.path.join(OUTPUT_DIR, "shap_summary.png")
 
 
 def _as_2d(shap_values) -> np.ndarray:
@@ -135,7 +125,7 @@ def get_feature_importance_summary(shap_values, feature_names: list) -> dict:
     return dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
 
 
-def save_shap_plot(shap_values, X_test, feature_names: list) -> str:
+def save_shap_plot(shap_values, X_test, feature_names: list, path: str) -> str:
     arr = np.array(shap_values)
     # The beeswarm needs signed values, so plot the positive class rather than
     # the unsigned class-average used for the ranking.
@@ -144,94 +134,60 @@ def save_shap_plot(shap_values, X_test, feature_names: list) -> str:
 
     X_test_df = pd.DataFrame(X_test, columns=feature_names)
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     plt.figure(figsize=(10, 6))
     shap.summary_plot(arr, X_test_df, show=False, plot_size=None)
     plt.tight_layout()
-    plt.savefig(SHAP_PLOT_PATH, dpi=150, bbox_inches='tight')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"SHAP plot saved to {SHAP_PLOT_PATH}")
-    return SHAP_PLOT_PATH
+    return path
 
 
-class FeatureEffect(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    feature: str
-    impact: str
-    explanation: str
-
-
-class ShapInterpretation(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    plain_english_summary: str
-    top_3_features: list[FeatureEffect] = Field(max_length=5)
-    surprising_findings: str
-    business_insight: str
-
-
-def interpret_shap_with_ai(importance_dict: dict,
-                            problem_type: str,
-                            target_col: str) -> dict:
-    prompt = f"""
-You are an expert data scientist explaining model predictions.
-
-TARGET VARIABLE: {target_col}
-PROBLEM TYPE: {problem_type}
-
-FEATURE IMPORTANCE (mean |SHAP| value):
-{json.dumps(importance_dict, indent=2)}
-
-Respond ONLY with JSON:
-{{
-    "plain_english_summary": "2-3 sentence explanation",
-    "top_3_features": [
-        {{
-            "feature": "feature name",
-            "impact": "positive or negative",
-            "explanation": "plain English explanation"
-        }}
-    ],
-    "surprising_findings": "anything unexpected",
-    "business_insight": "practical actionable insight"
-}}
-"""
-    return call_llm_json(
-        prompt=prompt,
-        system="You are an AI explainability expert. Respond with valid JSON only.",
-        model_cls=ShapInterpretation,
-        max_tokens=1024,
-    ).model_dump()
+def _direction(shap_2d: np.ndarray, X_test: pd.DataFrame, feature_names: list) -> dict:
+    """
+    Sign of the relationship between a feature's value and its SHAP value:
+    +1 means higher values push the prediction up. Spearman, so it is robust to
+    the feature's scale and to label-encoded categoricals' arbitrary order.
+    """
+    out = {}
+    X = np.asarray(X_test, dtype=float)
+    for i, name in enumerate(feature_names):
+        x, s = X[:, i], shap_2d[:, i]
+        if np.std(x) == 0 or np.std(s) == 0:
+            out[name] = 0.0
+            continue
+        from scipy import stats
+        out[name] = round(float(stats.spearmanr(x, s).statistic), 3)
+    return out
 
 
-def run_explain_agent(df: pd.DataFrame, target_col: str,
-                      problem_type: str, best_model_name: str) -> dict:
-    print("\nExplanation Agent starting...")
-    print(f"Retraining {best_model_name} for explanation...")
+def explain(df: pd.DataFrame, target_col: str, model_name: str, plot_path: str,
+            exclude: tuple = (), top_k: int = 10) -> dict:
+    data = df.drop(columns=[c for c in exclude if c in df.columns and c != target_col])
+    data = data.dropna(subset=[target_col])
+    problem_type = decide_problem_type(data[target_col])["problem_type"]
 
     model, X_train, X_test, feature_names = train_best_model(
-        df, target_col, problem_type, best_model_name
-    )
+        data, target_col, problem_type, model_name)
+    _, shap_values = compute_shap_values(model, X_train, X_test)
+    importance = get_feature_importance_summary(shap_values, feature_names)
 
-    explainer, shap_values = compute_shap_values(model, X_train, X_test)
-    importance_dict = get_feature_importance_summary(shap_values, feature_names)
-
-    print("\nFeature importance (SHAP):")
-    for feat, val in list(importance_dict.items())[:5]:
-        print(f"  {feat}: {val}")
-
-    plot_path = save_shap_plot(shap_values, X_test, feature_names)
-
-    print("\nAsking AI to interpret SHAP results...")
-    interpretation = interpret_shap_with_ai(importance_dict, problem_type, target_col)
-
-    print("\n--- Explanation Summary ---")
-    print(f"Summary: {interpretation['plain_english_summary']}")
+    signed = np.array(shap_values)
+    if signed.ndim == 3:
+        signed = signed[:, :, -1]
+    direction = _direction(signed, X_test, feature_names)
+    save_shap_plot(shap_values, X_test, feature_names, plot_path)
 
     return {
-        "explained_model": best_model_name,
-        "feature_importance": importance_dict,
-        "interpretation": interpretation,
-        "shap_plot_path": plot_path
+        "target": target_col,
+        "model": model_name,
+        "problem_type": problem_type,
+        "top_features": [
+            {"feature": f, "mean_abs_shap": v, "value_shap_spearman": direction.get(f)}
+            for f, v in list(importance.items())[:top_k]
+        ],
+        "plot_path": plot_path,
+        "note": "value_shap_spearman > 0: higher feature values push the prediction "
+                "towards the positive class / higher target. Label-encoded categoricals "
+                "have arbitrary order, so their sign is not interpretable.",
     }

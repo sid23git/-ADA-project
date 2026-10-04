@@ -1,0 +1,115 @@
+[
+  {
+    "scenario": "churn",
+    "completed": true,
+    "failed_tasks": 0,
+    "driver_recall": 0.75,
+    "drivers_found": [
+      "contract",
+      "support_calls",
+      "tenure_months"
+    ],
+    "drivers_missed": [
+      "monthly_charges"
+    ],
+    "false_discoveries": [],
+    "traps_caught": {},
+    "grounding_rate": 1.0,
+    "invalid_citations": 0,
+    "findings_total": 6,
+    "findings_accepted": 6,
+    "rejected_by_verification": 0,
+    "rejected_by_critic": 0,
+    "hypothesis_tests": 3,
+    "cost_usd": 0.081,
+    "llm_calls": 12,
+    "wall_seconds": 5.9,
+    "mode": "offline",
+    "passed": true
+  },
+  {
+    "scenario": "leakage",
+    "completed": true,
+    "failed_tasks": 0,
+    "driver_recall": 0.75,
+    "drivers_found": [
+      "contract",
+      "support_calls",
+      "tenure_months"
+    ],
+    "drivers_missed": [
+      "monthly_charges"
+    ],
+    "false_discoveries": [
+      "exit_survey_completed"
+    ],
+    "traps_caught": {
+      "target_leakage": true
+    },
+    "grounding_rate": 1.0,
+    "invalid_citations": 0,
+    "findings_total": 7,
+    "findings_accepted": 7,
+    "rejected_by_verification": 0,
+    "rejected_by_critic": 0,
+    "hypothesis_tests": 3,
+    "cost_usd": 0.0957,
+    "llm_calls": 13,
+    "wall_seconds": 7.2,
+    "mode": "offline",
+    "passed": false
+  },
+  {
+    "scenario": "dirty_readmission",
+    "completed": true,
+    "failed_tasks": 0,
+    "driver_recall": 1.0,
+    "drivers_found": [
+      "diabetic",
+      "length_of_stay_days",
+      "prior_admissions"
+    ],
+    "drivers_missed": [],
+    "false_discoveries": [],
+    "traps_caught": {
+      "sentinel_value": true,
+      "duplicate_rows": true
+    },
+    "grounding_rate": 1.0,
+    "invalid_citations": 0,
+    "findings_total": 6,
+    "findings_accepted": 6,
+    "rejected_by_verification": 0,
+    "rejected_by_critic": 0,
+    "hypothesis_tests": 2,
+    "cost_usd": 0.0785,
+    "llm_calls": 12,
+    "wall_seconds": 17.4,
+    "mode": "offline",
+    "passed": true
+  },
+  {
+    "scenario": "null_world",
+    "completed": true,
+    "failed_tasks": 0,
+    "driver_recall": null,
+    "drivers_found": [],
+    "drivers_missed": [],
+    "false_discoveries": [
+      "pages_viewed"
+    ],
+    "traps_caught": {},
+    "grounding_rate": 1.0,
+    "invalid_citations": 0,
+    "findings_total": 6,
+    "findings_accepted": 6,
+    "rejected_by_verification": 0,
+    "rejected_by_critic": 0,
+    "hypothesis_tests": 3,
+    "cost_usd": 0.0772,
+    "llm_calls": 12,
+    "wall_seconds": 4.1,
+    "mode": "offline",
+    "passed": false
+  }
+]

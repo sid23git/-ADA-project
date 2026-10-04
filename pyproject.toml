@@ -1,7 +1,7 @@
 [project]
 name = "ada"
-version = "3.0.0"
-description = "Autonomous Data Analysis Agent: a LangGraph multi-agent pipeline that turns a CSV into tested hypotheses, models and explanations."
+version = "4.0.0"
+description = "An auditable multi-agent AI data-science team: a lead agent, parallel tool-using specialists, a skeptical critic and code-verified, evidence-cited reports."
 readme = "README.md"
 requires-python = ">=3.11"
 
@@ -15,7 +15,7 @@ filterwarnings = [
 ]
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 target-version = "py311"
 extend-exclude = ["venv"]
 

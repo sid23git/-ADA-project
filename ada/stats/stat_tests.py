@@ -1,9 +1,9 @@
 """
 Statistical testing for hypothesis validation.
 
-INVARIANT: this module must never import utils.llm. Every verdict ADA reports is
+INVARIANT: this module must never import ada.llm. Every verdict ADA reports is
 decided here, in code, from a computed test statistic — that guarantee is only
-real if no model can reach into this file. tests/test_stat_tests.py asserts it.
+real if no model can reach into this file. tests/test_stats.py asserts it.
 
 Pipeline: resolve -> test -> correct across the family -> decide verdict.
 """
@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from utils.hypothesis_schema import (
+from ada.stats.hypothesis_schema import (
     ClaimType,
     Direction,
     NotTestableReason,
@@ -228,7 +228,7 @@ def _run_group_difference(spec, df, resolved) -> dict:
                 n_used, n_total,
             )
 
-        from utils import effect_sizes as es
+        from ada.stats import effect_sizes as es
 
         if min(a.size, b.size) >= PARAMETRIC_N:
             parametric, assumption = True, f"both groups n>={PARAMETRIC_N}, CLT applies"
@@ -282,7 +282,7 @@ def _run_group_difference(spec, df, resolved) -> dict:
             n_used, n_total,
         )
 
-    from utils import effect_sizes as es
+    from ada.stats import effect_sizes as es
 
     normal = all(
         (stats.shapiro(g).pvalue > 0.05) if 3 <= g.size <= 5000 else False
@@ -365,7 +365,7 @@ def _run_proportion_difference(spec, df, resolved) -> dict:
             n_used, n_total,
         )
 
-    from utils import effect_sizes as es
+    from ada.stats import effect_sizes as es
 
     expected = stats.contingency.expected_freq(table)
     if expected.min() < 5:
@@ -419,7 +419,7 @@ def _run_correlation(spec, df, resolved) -> dict:
     if x.std() == 0 or y.std() == 0:
         return _insufficient("one of the columns is constant", n_used, n_total)
 
-    from utils import effect_sizes as es
+    from ada.stats import effect_sizes as es
 
     if n_used >= PARAMETRIC_N:
         normal, assumption = True, f"n>={PARAMETRIC_N}, CLT applies"
@@ -480,7 +480,7 @@ def _run_association(spec, df, resolved) -> dict:
             n_used, n_total,
         )
 
-    from utils import effect_sizes as es
+    from ada.stats import effect_sizes as es
 
     counts = table.to_numpy()
     expected = stats.contingency.expected_freq(counts)

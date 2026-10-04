@@ -1,7 +1,7 @@
 """
 Typed hypothesis schema shared by the hypothesis and validator agents.
 
-This module deliberately imports nothing from utils.llm and nothing from scipy —
+This module deliberately imports nothing from ada.llm and nothing from scipy —
 it is the vocabulary both agents speak, not the machinery either one runs.
 """
 
@@ -67,6 +67,7 @@ class NotTestableReason(str, Enum):
 
 
 class TestSpec(BaseModel):
+    __test__ = False  # not a pytest test class, despite the name
     """The machine-readable half of a hypothesis: what to test, on what, which way."""
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
