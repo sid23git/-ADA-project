@@ -7,11 +7,19 @@ import threading
 import time
 
 import altair as alt
+import anthropic
 import pandas as pd
 import streamlit as st
 
-from ada import llm
-from ada.config import LEAD_MODEL, WORKER_MODEL, Budget, Settings
+from ada.config import (
+    LEAD_MODEL,
+    PUBLIC_DEMO,
+    PUBLIC_MAX_COST_USD,
+    PUBLIC_MAX_ROWS,
+    WORKER_MODEL,
+    Budget,
+    Settings,
+)
 from ada.offline import ScriptedClaude
 from ada.run import investigate
 from evals.scenarios import SCENARIOS, load
@@ -27,7 +35,8 @@ SAMPLE = "titanic (data/sample.csv)"
 
 
 def _scenario_options():
-    return [SAMPLE] + list(SCENARIOS)
+    # Churn first: a business question is the clearest first impression.
+    return list(SCENARIOS) + [SAMPLE]
 
 
 def _load_choice(choice):
@@ -46,6 +55,10 @@ with st.sidebar:
     if source == "Upload CSV":
         upload = st.file_uploader("CSV file", type=["csv"])
         df = pd.read_csv(upload) if upload else None
+        if df is not None and PUBLIC_DEMO and len(df) > PUBLIC_MAX_ROWS:
+            st.warning(f"The hosted demo analyses the first {PUBLIC_MAX_ROWS:,} rows. "
+                       "Run ADA locally for larger files.")
+            df = df.head(PUBLIC_MAX_ROWS)
         default_q, default_target = "", None
     else:
         choice = st.selectbox("Dataset", _scenario_options(),
@@ -61,14 +74,29 @@ with st.sidebar:
         picked = st.selectbox("Target column", options, index=idx)
         target = None if picked == options[0] else picked
 
-    has_key = bool(os.getenv("ANTHROPIC_API_KEY"))
-    mode = st.radio("Agents", ["Live — Claude", "Offline — scripted"], index=0 if has_key else 1,
+    # On the hosted demo the server's own key is never used: visitors bring theirs.
+    server_key = None if PUBLIC_DEMO else os.getenv("ANTHROPIC_API_KEY")
+    mode = st.radio("Agents", ["Live — Claude", "Offline — scripted"], index=0 if server_key else 1,
                     help="Offline mode runs the real tools, ledger, verifier and orchestration with "
                          "rule-based stand-ins for the model. No API key, no cost, not AI.")
-    max_cost = st.slider("Budget (USD)", 0.5, 10.0, 3.0, 0.5,
+    live = mode.startswith("Live")
+    user_key = ""
+    if live:
+        user_key = st.text_input(
+            "Your Anthropic API key", type="password",
+            placeholder="sk-ant-..." if not server_key else "optional — using the server's key",
+            help="Used only for this browser session's runs; never stored or logged. "
+                 "Get one at console.anthropic.com.")
+        st.caption("🔒 In live mode the dataset profile and the agents' tool results are sent to "
+                   "Anthropic's API. Use offline mode for data you cannot share.")
+    api_key = user_key.strip() or server_key
+    cap = PUBLIC_MAX_COST_USD if PUBLIC_DEMO else 10.0
+    max_cost = st.slider("Budget (USD)", 0.5, cap, min(2.0, cap), 0.5,
                          help="Hard cap. New LLM calls stop once it is spent; you still get a memo.")
     run = st.button("Run investigation", type="primary", use_container_width=True,
-                    disabled=df is None or not question.strip())
+                    disabled=df is None or not question.strip() or (live and not api_key))
+    if live and not api_key:
+        st.caption("Enter an API key, or switch to offline mode to try it free.")
     st.caption(f"Lead / critic / reporter: `{LEAD_MODEL}` · specialists: `{WORKER_MODEL}`")
 
 
@@ -98,7 +126,9 @@ def _feed_line(e: dict) -> str:
 
 if run:
     st.session_state.pop("result", None)
-    llm.set_client(ScriptedClaude() if mode.startswith("Offline") else None)
+    # A client per run, never a shared global: concurrent visitors on a hosted
+    # demo must never use each other's API key.
+    client = anthropic.Anthropic(api_key=api_key) if live else ScriptedClaude()
     events: queue.Queue = queue.Queue()
     box: dict = {}
 
@@ -106,7 +136,7 @@ if run:
         try:
             box["result"] = investigate(df, question.strip(), target=target,
                                         settings=Settings(budget=Budget(max_cost_usd=max_cost)),
-                                        on_event=events.put)
+                                        on_event=events.put, client=client)
         except Exception as exc:  # surfaced in the UI below
             box["error"] = exc
 
@@ -138,7 +168,7 @@ if run:
         st.stop()
     status.update(label="Investigation complete", state="complete", expanded=False)
     st.session_state["result"] = box["result"]
-    st.session_state["offline"] = mode.startswith("Offline")
+    st.session_state["offline"] = not live
 
 
 # ── Results ─────────────────────────────────────────────────────────────────

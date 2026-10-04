@@ -22,7 +22,7 @@ Streamlit UI.
 - UI: `streamlit run app.py`
 - CLI: `python -m ada data/sample.csv "question" --target Survived`. Add `--offline` to run with
   no API key.
-- Tests: `pytest`. About 80 tests that need no API key. The full investigations run against
+- Tests: `pytest`. 88 tests that need no API key. The full investigations run against
   `ada.offline.ScriptedClaude`.
 - Lint: `ruff check .` (line length 120).
 - Evals: `python -m evals.run [scenario ...] [--offline]`. Live mode calls Claude and costs money,
@@ -64,6 +64,15 @@ fallback beta.
   checks this via AST.
 - `ml/` handles modeling (problem type, CV, model selection, `detect_leakage`) and SHAP
   explanations. It is pure computation.
+- **Per-run clients.** Each investigation's Anthropic client lives on `Tracer.client`
+  (`investigate(..., client=...)`). `llm.create` uses it before the global `get_client()`
+  fallback. Never use `set_client()` in request-serving code: concurrent runs, such as two
+  visitors on the hosted demo, would share a key.
+- **Public demo mode** (`ADA_PUBLIC_DEMO=1`, see `docs/DEPLOY.md`): the server key is ignored
+  (visitors bring their own), budget is capped at $2, uploads are capped, and
+  `Settings.allow_code_execution=False` removes `run_python` from the specialists' tools.
+- **Packaging.** The distribution name is `ada-agents` and the console script is `ada`. The
+  public API is exported from `ada/__init__.py`.
 - `llm.py` is the only module that calls the API. `create()` handles budget checks, the
   fallback beta, `output_config.effort` and prompt caching.
   - `set_client()` swaps in `ScriptedClaude`.

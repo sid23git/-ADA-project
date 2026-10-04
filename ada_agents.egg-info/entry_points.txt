@@ -1,0 +1,2 @@
+[console_scripts]
+ada = ada.__main__:main

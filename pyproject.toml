@@ -1,9 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "ada"
+# Distribution name; the import name is `ada`.
+name = "ada-agents"
 version = "4.0.0"
 description = "An auditable multi-agent AI data-science team: a lead agent, parallel tool-using specialists, a skeptical critic and code-verified, evidence-cited reports."
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+# Lower bounds for library users; requirements.txt pins the exact versions CI tests.
+dependencies = [
+    "anthropic>=0.86",
+    "langgraph>=1.1",
+    "matplotlib>=3.9",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pydantic>=2.10",
+    "python-dotenv>=1.0",
+    "scikit-learn>=1.6",
+    "scipy>=1.14",
+    "shap>=0.47",
+    "xgboost>=2.1",
+]
+
+[project.optional-dependencies]
+ui = ["streamlit>=1.40", "altair>=5"]
+
+[project.scripts]
+ada = "ada.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/sid23git/-ADA-project"
+
+[tool.setuptools.packages.find]
+include = ["ada*", "evals*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -134,3 +134,51 @@ def test_api_failure_mid_run_ends_gracefully_with_a_memo(tmp_path):
     # Nothing unreviewed reaches the memo: the critic never ran, so nothing was accepted.
     assert result.ledger.findings("accepted") == []
     assert all(f.status == "pending" for f in result.ledger.findings())
+
+
+class ExplodingClient:
+    """Installed as the process-wide default: any call that reaches it is a leak."""
+
+    def __getattr__(self, name):
+        raise AssertionError("a run used the shared global client instead of its own")
+
+
+def test_concurrent_runs_each_use_only_their_own_client(tmp_path):
+    """Two visitors on the hosted demo, at the same time, with different keys."""
+    import threading
+
+    from ada import llm
+    llm.set_client(ExplodingClient())
+    a, b = ScriptedClaude(), ScriptedClaude()
+    results = {}
+
+    def run(name, client):
+        results[name] = investigate(SAMPLE_CSV, QUESTION, target="Survived",
+                                    run_dir=str(tmp_path / name), client=client)
+    try:
+        threads = [threading.Thread(target=run, args=("a", a)), threading.Thread(target=run, args=("b", b))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        llm.set_client(None)
+
+    assert set(results) == {"a", "b"}
+    assert a.calls and b.calls                      # each client served its own run...
+    assert a.calls.count("lead") == b.calls.count("lead") == 2   # ...and only its own
+
+
+def test_code_execution_can_be_disabled_for_untrusted_data(tmp_path, monkeypatch):
+    from ada.agents import team
+    seen = {}
+    real = team.run_tool_agent
+
+    def spy(cfg, **kw):
+        seen[kw["name"]] = kw["tool_names"]
+        return real(cfg, **kw)
+    monkeypatch.setattr(team, "run_tool_agent", spy)
+
+    investigate(SAMPLE_CSV, QUESTION, target="Survived", run_dir=str(tmp_path),
+                settings=Settings(allow_code_execution=False), client=ScriptedClaude())
+    assert seen and all("run_python" not in tools for tools in seen.values())
