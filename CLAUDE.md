@@ -4,109 +4,81 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-ADA (Autonomous Data Analysis Agent) is a Streamlit app that takes an uploaded CSV and runs it
-through a multi-agent LangGraph pipeline:
+ADA is a multi-agent AI data-science team. Given a CSV and a business question:
 
-hypothesis generation → EDA → cleaning → ML training → SHAP explanation → hypothesis validation → report
+- A **lead** agent plans the investigation.
+- **Specialists** (`data_quality`, `statistician`, `ml_engineer`) run in parallel and use real
+  analysis tools.
+- A **critic** reviews every finding.
+- A **reporter** writes a decision memo.
 
-It renders the results across tabs. All LLM calls go through Claude (Anthropic API). The README
-is the public-facing description; keep it in sync when behaviour changes, especially the
-"LLM proposes, code decides" table and the test counts.
+Every number in a finding or in the memo must trace to an evidence item produced by a tool, and
+code verifies this. Built on LangGraph and the Anthropic SDK (manual tool-use loop), with a
+Streamlit UI.
 
 ## Commands
 
-- Install: `pip install -r requirements-dev.txt` (runtime-only deps: `requirements.txt`)
+- Install: `pip install -r requirements-dev.txt`
 - UI: `streamlit run app.py`
-- CLI: `python main.py [csv] [--target COL]`. With no arguments it runs `data/sample.csv` with
-  target `Survived`.
-- Tests: `pytest`. This runs the whole pipeline offline in about 15 seconds and needs no API key.
-  Run a single test with `pytest tests/test_pipeline.py::test_failed_node_is_retried_not_skipped`.
-- Lint: `ruff check .` (config in `pyproject.toml`). CI (`.github/workflows/ci.yml`) runs both.
+- CLI: `python -m ada data/sample.csv "question" --target Survived`. Add `--offline` to run with
+  no API key.
+- Tests: `pytest`. About 80 tests that need no API key. The full investigations run against
+  `ada.offline.ScriptedClaude`.
+- Lint: `ruff check .` (line length 120).
+- Evals: `python -m evals.run [scenario ...] [--offline]`. Live mode calls Claude and costs money,
+  capped by `--max-cost` per scenario. Results go to `evals/results/`.
 
-A real run needs `ANTHROPIC_API_KEY` in `.env` (see `.env.example`). `ADA_MODEL` overrides the
-default model (`claude-haiku-4-5-20251001`).
+Live runs need `ANTHROPIC_API_KEY`. Models are set by `ADA_LEAD_MODEL` (default
+`claude-opus-5-5`, used for lead, critic and reporter) and `ADA_WORKER_MODEL` (default
+`claude-sonnet-5-5`, used for specialists). `ADA_FALLBACKS=0` disables the server-side refusal
+fallback beta.
 
-## Core design rule: the LLM proposes, code decides
+## Architecture (`ada/`)
 
-Anything with a correct answer is computed in code, and the LLM only proposes or narrates:
+- `graph.py` is a LangGraph loop: `lead → Send() fan-out to specialist ×N (parallel threads) →
+  critic → lead … → report`.
+  - Live objects (df, ledger, tracer, settings) live on a `Runtime` closed over by the nodes.
+    Graph state is plain data.
+  - `Runtime.halted` (set on budget exhaustion) routes straight to `report`.
+- `agents/base.py` holds the manual tool-use loop.
+  - It appends `response.content` unchanged (thinking blocks included, append-only history).
+  - All tool results for a turn go back in one user message.
+  - The loop ends when `submit_findings` succeeds. There is one nudge, then a step budget.
+- `agents/team.py` holds `lead_plan`, `run_specialist`, `critic_review`,
+  `final_reverification` and `write_memo`; `agents/prompts.py` holds the system prompts.
+  - The critic only judges findings that already passed `verify.check_finding`. Blocking
+    failures are rejected in code, and the LLM can make a verdict stricter but never rescue a
+    finding.
+- `tools/catalog.py` defines each tool as a pydantic input model plus a pure function.
+  - `tools/registry.execute` validates the input, runs the tool, records evidence (E#) and
+    returns errors as `is_error` results instead of raising.
+  - `run_hypothesis_test` takes `stats.hypothesis_schema.TestSpec` as its input schema.
+- `ledger.py` holds `EvidenceLedger` (thread-safe) with evidence and findings.
+  - `correct_family()` re-runs BH correction across *every* test the team has run and
+    recomputes verdicts. Earlier verdicts can change as tests accumulate.
+- `verify.py` holds the deterministic checks:
+  - `check_finding`: citations resolve, numbers are grounded, statistical support, predictive
+    support, columns exist, and a causal-language warning.
+  - `lint_memo`: the memo grounding rate.
+- `stats/` is the statistical engine. It must never import `ada.llm`; `tests/test_stats.py`
+  checks this via AST.
+- `ml/` handles modeling (problem type, CV, model selection, `detect_leakage`) and SHAP
+  explanations. It is pure computation.
+- `llm.py` is the only module that calls the API. `create()` handles budget checks, the
+  fallback beta, `output_config.effort` and prompt caching.
+  - `set_client()` swaps in `ScriptedClaude`.
+  - `call_json()` validates against pydantic and retries with the error.
+- `tracing.py` holds `Tracer`: spans, events, cost, and `BudgetExceeded`. Event callbacks are
+  exception-isolated.
+- `offline.py` holds `ScriptedClaude`, rule-based stand-ins keyed on each agent's system-prompt
+  opening. If you change the first sentence of a system prompt, update its routing.
+- `sandbox.py` (`run_python`) uses AST validation, restricted builtins and a subprocess timeout.
+  It is defense in depth, not a security boundary.
 
-- Hypothesis verdicts
-- Multiple-comparison correction
-- Problem type
-- Best-model selection
-- Cleaning safety (never drop or impute the target, `mean`/`median` only on numeric columns)
+`evals/` holds seeded synthetic scenarios with planted drivers, null columns and traps (leakage,
+-999 sentinels, duplicates). `graders.py` scores structured findings (driver recall, false
+discoveries, traps caught, grounding, cost). Scripted agents intentionally fail `null_world`:
+that's the naive baseline.
 
-Preserve this when changing agents. Concretely:
-
-- `utils/stat_tests.py` must never import `utils.llm`. An AST test enforces it.
-- LLM output that code consumes goes through `call_llm_json(prompt, system, model_cls)`. It
-  validates against a pydantic model and re-prompts with the error on failure. Don't hand-parse
-  JSON with `json.loads`.
-- Set code-decided values *after* the LLM call, so the response can't override them. For
-  example, `ml_agent.interpret_results` sets `best_model` after the call.
-
-## Architecture
-
-### LangGraph pipeline (`ada_graph.py`)
-
-`run_ada(filepath, target_col, on_step)` builds and streams a `StateGraph` with 8 work nodes plus
-`error_handler`. (`run_ada_v2` is a backwards-compatible alias.) The UI passes `on_step` to drive
-its progress bar.
-
-- **State.** `ADAState` (`utils/ada_state.py`) is a `TypedDict`. Nodes return
-  `{**state, ...updates}` and append to `audit_trail` via `log()`.
-- **Routing.** `NEXT_NODE` is the single ordering table.
-- **Error path.** `check_error` sends any node with `state["error"]` set to `error_handler`.
-  `error_handler` then picks one of three outcomes:
-  - **Critical node** (`load_data`): the error stays set and the run ends.
-  - **Retry:** it sets `retry_target`, and the failed node runs again, up to `MAX_RETRIES=2`
-    times per node.
-  - **Give up:** it clears the error and skips to the next node.
-
-  `route_after_error` acts on that decision. Don't route the error handler through
-  `check_error`. That was the old bug: retries silently skipped ahead, and a `CRITICAL` error
-  looped until LangGraph's recursion limit.
-- **Optional nodes.** `hypothesis`, `explain` and `validator` catch their own exceptions and
-  return `{}`, so they never trigger retries. If `cleaning` is skipped, `ml` falls back to
-  `raw_df`. The report node must tolerate `None` for any skipped stage (`state.get(x) or {}`).
-
-### Agents (`agents/`)
-
-Each agent is a module of plain functions with a `run_*_agent()` entry point.
-
-- `hypothesis_agent` profiles columns and asks for 5 typed hypotheses (`HypothesisSet` in
-  `utils/hypothesis_schema.py`).
-- `eda_agent` computes `analyze_dataframe` stats; the LLM narrates them.
-- `cleaning_agent` produces a `CleaningStrategy` (pydantic, `Literal` strategy names);
-  `apply_cleaning_strategy` applies it with guards.
-- `ml_agent` handles framing and training:
-  - `decide_problem_type` uses dtype and cardinality.
-  - `prepare_features` label-encodes, median-fills leftover NaN, and encodes classification
-    targets to 0..k-1 for XGBoost.
-  - `build_model` wraps linear models in a `StandardScaler` pipeline.
-  - `split_data` holds the shared train/test split; `select_best_model` picks by
-    `SELECTION_METRIC` (CV F1 or CV R²).
-- `explain_agent` reuses `prepare_features`, `build_model` and `split_data` from `ml_agent`, so
-  it explains exactly the trained model. It unwraps pipelines for SHAP and saves the plot under
-  `outputs/`.
-- `validator_agent` runs the tests from `utils/stat_tests.py` (effect sizes are in
-  `utils/effect_sizes.py`) on `raw_df`, never the imputed frame. The LLM writes only
-  `insight`/`caveat`.
-
-### LLM layer (`utils/llm.py`)
-
-`call_llm` and `call_llm_json` are the only way to reach Claude. The client is created lazily by
-`get_client()`. `set_client()` swaps it, and tests install `tests/fakes.FakeAnthropic` this way.
-That fake routes on a phrase unique to each agent's prompt. If you change one of those prompt
-phrases, update `ROUTES` in `tests/fakes.py`.
-
-### Frontend (`app.py`)
-
-The flow is upload → preview → run. The upload is saved to `data/uploaded_<timestamp>.csv` and
-deleted in `finally`. Eight result tabs map 1:1 to `ADAState` fields.
-
-### Outputs
-
-`outputs/` is gitignored and created on demand. It holds `ADA_v3_report_<ts>.txt`,
-`ADA_v3_audit_<ts>.json` and `shap_summary.png`. `docs/images/shap_summary.png` is a committed
-example for the README.
+Each run writes `runs/<timestamp>/` (gitignored) containing `memo.md`, `investigation.json` and
+`shap_<target>.png`. The v3 linear pipeline is preserved at git tag `v3.1`.
