@@ -1,4 +1,4 @@
-from typing import TypedDict, Optional, Any
+from typing import Any, Optional, TypedDict
 
 
 class ADAState(TypedDict):
@@ -29,6 +29,7 @@ class ADAState(TypedDict):
     current_node: Optional[str]
     error: Optional[str]
     retry_count: int
+    retry_target: Optional[str]          # node the error handler is re-running
     audit_trail: list
 
     # ── Metadata ──────────────────────────────────────

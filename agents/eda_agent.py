@@ -1,6 +1,9 @@
-import pandas as pd
+import json
+
 import numpy as np
+import pandas as pd
 from dotenv import load_dotenv
+
 from utils.llm import call_llm
 
 load_dotenv()
@@ -16,17 +19,16 @@ def analyze_dataframe(df: pd.DataFrame) -> dict:
     if numeric_cols:
         analysis["numeric_summary"] = df[numeric_cols].describe().to_dict()
     categorical_cols = df.select_dtypes(include=["object"]).columns.tolist()
-    analysis["categorical_summary"] = {col: df[col].nunique() for col in categorical_cols}
+    analysis["categorical_summary"] = {col: int(df[col].nunique()) for col in categorical_cols}
     analysis["potential_target"] = df.columns[-1]
     return analysis
 
 
-def run_eda_agent(filepath: str) -> str:
-    print(f"Loading dataset from {filepath}...")
-    df = pd.read_csv(filepath)
-    print(f"Dataset loaded: {df.shape[0]} rows, {df.shape[1]} columns")
-    print("Extracting statistics...")
-    stats = analyze_dataframe(df)
+def run_eda_agent(df: pd.DataFrame, stats: dict = None) -> str:
+    print(f"Analyzing dataset: {df.shape[0]} rows, {df.shape[1]} columns")
+    if stats is None:
+        print("Extracting statistics...")
+        stats = analyze_dataframe(df)
     print("Running AI analysis...")
 
     prompt = f"""
@@ -34,7 +36,7 @@ You are an expert data scientist performing Exploratory Data Analysis (EDA).
 Analyze these statistics and produce a professional EDA report.
 
 DATASET STATISTICS:
-{stats}
+{json.dumps(stats, indent=2, default=str)}
 
 Please provide:
 1. Dataset overview

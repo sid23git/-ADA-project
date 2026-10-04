@@ -1,21 +1,51 @@
-# TODO v4.0 — refactor nodes into separate files under nodes/ folder
+"""
+ADA's LangGraph pipeline.
+
+    load_data -> hypothesis -> eda -> cleaning -> ml -> explain -> validator -> report
+
+Every node returns a new state ({**state, ...}) and appends to the audit trail.
+A node that raises sets state["error"]; the conditional edge after it routes to
+error_handler, which either stops the run (load_data), retries the failed node,
+or — once retries are exhausted — skips ahead to the next node.
+"""
+
+import json
+import os
+from collections.abc import Callable
+from datetime import datetime
+from typing import Literal, Optional
 
 import pandas as pd
-from datetime import datetime
-from typing import Literal
-from langgraph.graph import StateGraph, END
-from utils.ada_state import ADAState
-from utils.llm import call_llm
-from agents.eda_agent import analyze_dataframe, run_eda_agent
+from dotenv import load_dotenv
+from langgraph.graph import END, StateGraph
+
 from agents.cleaning_agent import run_cleaning_agent
-from agents.ml_agent import run_ml_agent
+from agents.eda_agent import analyze_dataframe, run_eda_agent
 from agents.explain_agent import run_explain_agent
 from agents.hypothesis_agent import run_hypothesis_agent
+from agents.ml_agent import run_ml_agent
 from agents.validator_agent import run_validator_agent
-from dotenv import load_dotenv
-import json
+from utils.ada_state import ADAState
+from utils.llm import call_llm
 
 load_dotenv()
+
+OUTPUT_DIR = "outputs"
+MAX_RETRIES = 2
+CRITICAL_NODES = ("load_data",)
+
+# Linear order of the pipeline. Both normal routing and "skip after giving up"
+# read from this one table.
+NEXT_NODE = {
+    "load_data": "hypothesis",
+    "hypothesis": "eda",
+    "eda": "cleaning",
+    "cleaning": "ml",
+    "ml": "explain",
+    "explain": "validator",
+    "validator": "report",
+    "report": "end",
+}
 
 
 # ─────────────────────────────────────────────────
@@ -81,7 +111,7 @@ def eda_node(state: ADAState) -> ADAState:
         trail = log(state, "EDA", "Starting exploratory analysis...")
         df = state["raw_df"]
         eda_stats = analyze_dataframe(df)
-        eda_report = run_eda_agent(state["filepath"])
+        eda_report = run_eda_agent(df, eda_stats)
         missing_count = len(eda_stats.get("missing_values", {}))
         trail = log({"audit_trail": trail}, "EDA", "EDA complete",
                     f"Found {missing_count} columns with missing values")
@@ -102,7 +132,7 @@ def cleaning_node(state: ADAState) -> ADAState:
         trail = log(state, "Cleaning", "Starting data cleaning...")
         df = state["raw_df"]
         eda_stats = state["eda_stats"]
-        cleaned_df, strategy = run_cleaning_agent(df, eda_stats)
+        cleaned_df, strategy = run_cleaning_agent(df, eda_stats, state.get("target_col"))
         trail = log({"audit_trail": trail}, "Cleaning", "Cleaning complete",
                     f"Shape: {df.shape} -> {cleaned_df.shape}")
         return {**state, "cleaned_df": cleaned_df, "cleaning_strategy": strategy,
@@ -120,7 +150,13 @@ def cleaning_node(state: ADAState) -> ADAState:
 def ml_node(state: ADAState) -> ADAState:
     try:
         trail = log(state, "ML", "Starting model training...")
-        ml_results = run_ml_agent(state["cleaned_df"], target_col=state.get("target_col"))
+        df = state.get("cleaned_df")
+        if df is None:
+            # Cleaning gave up after its retries; train on the raw frame rather
+            # than lose the rest of the run.
+            df = state["raw_df"]
+            trail = log({"audit_trail": trail}, "ML", "No cleaned data — using raw dataset")
+        ml_results = run_ml_agent(df, target_col=state.get("target_col"))
         best_model = ml_results["interpretation"]["best_model"]
         trail = log({"audit_trail": trail}, "ML", "Training complete",
                     f"Best model: {best_model}")
@@ -163,18 +199,19 @@ def explain_node(state: ADAState) -> ADAState:
 
 def validator_node(state: ADAState) -> ADAState:
     try:
-        trail = log(state, "Validator", "Testing hypotheses against findings...")
+        trail = log(state, "Validator", "Running statistical tests on hypotheses...")
+        # Tests run on the RAW frame, not the cleaned one: imputed values
+        # fabricate certainty and bias p-values downward.
         validation = run_validator_agent(
             hypotheses=state.get("hypotheses", {}),
-            eda_stats=state.get("eda_stats", {}),
-            ml_results=state.get("ml_results", {}),
-            explain_results=state.get("explain_results", {})
+            df=state.get("raw_df")
         )
-        confirmed = sum(1 for v in validation.get("validation_results", [])
-                       if v.get("verdict") == "CONFIRMED")
-        total = len(validation.get("validation_results", []))
+        results = validation.get("validation_results", [])
+        confirmed = sum(1 for v in results if v.get("verdict") == "CONFIRMED")
+        tested = sum(1 for v in results
+                     if v.get("statistics", {}).get("p_value") is not None)
         trail = log({"audit_trail": trail}, "Validator", "Validation complete",
-                    f"{confirmed}/{total} hypotheses confirmed")
+                    f"{confirmed}/{len(results)} confirmed ({tested} statistically tested)")
         return {**state, "validation_results": validation,
                 "current_node": "validator", "audit_trail": trail, "error": None}
     except Exception as e:
@@ -192,35 +229,55 @@ def report_node(state: ADAState) -> ADAState:
         trail = log(state, "Report", "Generating final report...")
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        validation = state.get("validation_results", {})
+        # `or {}` rather than a .get default: a skipped stage leaves its key
+        # present but None.
+        validation = state.get("validation_results") or {}
+        ml_results = state.get("ml_results") or {}
         summary = {
-            "eda": state.get("eda_report", "")[:500],
-            "cleaning": state.get("cleaning_strategy", {}),
-            "ml": state.get("ml_results", {}).get("interpretation", {}),
-            "explanation": state.get("explain_results", {}).get("interpretation", {}),
+            "eda": (state.get("eda_report") or "")[:500],
+            "cleaning": state.get("cleaning_strategy") or {},
+            "ml": {
+                "problem_type": ml_results.get("problem_type"),
+                "model_results": ml_results.get("model_results"),
+                "interpretation": ml_results.get("interpretation"),
+            },
+            "explanation": (state.get("explain_results") or {}).get("interpretation", {}),
             "hypothesis_validation": {
                 "results": validation.get("validation_results", []),
-                "summary": validation.get("overall_summary", "")
+                "summary": validation.get("overall_summary", ""),
+                "alpha": validation.get("alpha"),
+                "correction_method": validation.get("correction_method")
             }
         }
 
         final_report = call_llm(
-            prompt=f"Write a professional data analysis report including hypothesis validation: {json.dumps(summary)}",
+            prompt=(
+                "Write a professional data analysis report including hypothesis "
+                "validation.\n\n"
+                "The hypothesis verdicts were computed in code from real statistical "
+                "tests — quote the test name, effect size and adjusted p-value when "
+                "you discuss one, and do not assign a verdict of your own. "
+                "NOT_SUPPORTED means the data did not provide evidence for the claim, "
+                "not that the claim is false. SIGNIFICANT_BUT_TRIVIAL means the result "
+                "was statistically significant but too small to matter practically.\n\n"
+                f"{json.dumps(summary, default=str)}"
+            ),
             system="You are a senior data scientist writing professional analysis reports.",
             max_tokens=1500
         )
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = f"outputs/ADA_v3_report_{timestamp}.txt"
-        audit_path = f"outputs/ADA_v3_audit_{timestamp}.json"
-
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(final_report)
-        with open(audit_path, "w", encoding="utf-8") as f:
-            json.dump(state.get("audit_trail", []), f, indent=2)
+        report_path = os.path.join(OUTPUT_DIR, f"ADA_v3_report_{timestamp}.txt")
+        audit_path = os.path.join(OUTPUT_DIR, f"ADA_v3_audit_{timestamp}.json")
 
         trail = log({"audit_trail": trail}, "Report", "Pipeline complete!",
                     f"Report saved to {report_path}")
+
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(final_report)
+        with open(audit_path, "w", encoding="utf-8") as f:
+            json.dump(trail, f, indent=2)
 
         return {**state, "final_report": final_report, "end_time": end_time,
                 "current_node": "report", "audit_trail": trail, "error": None}
@@ -232,53 +289,66 @@ def report_node(state: ADAState) -> ADAState:
 
 # ─────────────────────────────────────────────────
 # NODE 9 — Error Handler
-# ─
-# ────────────────────────────────────────────────
+# ─────────────────────────────────────────────────
 
 def error_handler_node(state: ADAState) -> ADAState:
+    """
+    Decide what happens after a node fails, and record the decision in
+    state["retry_target"] for route_after_error to act on:
+      - critical node      -> error stays set, pipeline ends
+      - retries remaining  -> retry_target = failed node, it runs again
+      - retries exhausted  -> retry_target = None, pipeline skips ahead
+    """
     error = state.get("error", "")
-    retry_count = state.get("retry_count", 0)
     current_node = state.get("current_node", "")
+
+    # The counter belongs to one node: a fresh failure elsewhere starts at 0
+    # rather than inheriting attempts spent on an earlier, recovered node.
+    attempts = (state.get("retry_count", 0)
+                if state.get("retry_target") == current_node else 0)
 
     trail = log(state, "ErrorHandler", f"Handling error in {current_node}", error)
 
-    if current_node in ["load_data"]:
+    if current_node in CRITICAL_NODES:
         trail = log({"audit_trail": trail}, "ErrorHandler",
                     "Critical node failed — stopping pipeline")
-        return {**state, "audit_trail": trail, "error": f"CRITICAL: {error}"}
+        return {**state, "audit_trail": trail, "retry_target": None,
+                "error": f"CRITICAL: {error}"}
 
-    if retry_count >= 2:
+    if attempts >= MAX_RETRIES:
         trail = log({"audit_trail": trail}, "ErrorHandler",
                     f"Max retries reached for {current_node} — skipping")
-        return {**state, "audit_trail": trail, "retry_count": 0, "error": None}
+        return {**state, "audit_trail": trail, "retry_count": 0,
+                "retry_target": None, "error": None}
 
     trail = log({"audit_trail": trail}, "ErrorHandler",
-                f"Retrying {current_node}", f"Attempt {retry_count + 1} of 2")
-    return {**state, "audit_trail": trail, "retry_count": retry_count + 1, "error": None}
+                f"Retrying {current_node}", f"Attempt {attempts + 1} of {MAX_RETRIES}")
+    return {**state, "audit_trail": trail, "retry_count": attempts + 1,
+            "retry_target": current_node, "error": None}
 
 
 # ─────────────────────────────────────────────────
 # CONDITIONAL EDGES
 # ─────────────────────────────────────────────────
 
-def check_error(state: ADAState) -> Literal[
-    "error_handler", "hypothesis", "eda", "cleaning",
-    "ml", "explain", "validator", "report", "end"
-]:
+Route = Literal["error_handler", "load_data", "hypothesis", "eda", "cleaning",
+                "ml", "explain", "validator", "report", "end"]
+
+
+def check_error(state: ADAState) -> Route:
+    """After a normal node: on to the next node, or to the error handler."""
     if state.get("error"):
         return "error_handler"
+    return NEXT_NODE.get(state.get("current_node", ""), "end")
 
-    routing = {
-        "load_data": "hypothesis",
-        "hypothesis": "eda",
-        "eda": "cleaning",
-        "cleaning": "ml",
-        "ml": "explain",
-        "explain": "validator",
-        "validator": "report",
-        "report": "end"
-    }
-    return routing.get(state.get("current_node", ""), "end")
+
+def route_after_error(state: ADAState) -> Route:
+    """After the error handler: stop, re-run the failed node, or skip past it."""
+    if state.get("error"):
+        return "end"
+    if state.get("retry_target"):
+        return state["retry_target"]
+    return NEXT_NODE.get(state.get("current_node", ""), "end")
 
 
 # ─────────────────────────────────────────────────
@@ -302,6 +372,7 @@ def build_ada_graph():
 
     route_map = {
         "error_handler": "error_handler",
+        "load_data": "load_data",
         "hypothesis": "hypothesis",
         "eda": "eda",
         "cleaning": "cleaning",
@@ -318,7 +389,7 @@ def build_ada_graph():
     for node in all_nodes:
         graph.add_conditional_edges(node, check_error, route_map)
 
-    graph.add_conditional_edges("error_handler", check_error, route_map)
+    graph.add_conditional_edges("error_handler", route_after_error, route_map)
 
     return graph.compile()
 
@@ -327,15 +398,8 @@ def build_ada_graph():
 # MAIN RUNNER
 # ─────────────────────────────────────────────────
 
-def run_ada_v2(filepath: str, target_col: str = None) -> dict:
-    print("=" * 55)
-    print("   ADA v3.0 — Hypothesis-Driven Analysis")
-    print("   Powered by Claude AI")
-    print("=" * 55)
-
-    ada_graph = build_ada_graph()
-
-    initial_state: ADAState = {
+def initial_state(filepath: str, target_col: Optional[str] = None) -> ADAState:
+    return {
         "filepath": filepath,
         "target_col": target_col,
         "raw_df": None,
@@ -351,15 +415,45 @@ def run_ada_v2(filepath: str, target_col: str = None) -> dict:
         "current_node": None,
         "error": None,
         "retry_count": 0,
+        "retry_target": None,
         "audit_trail": [],
         "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "end_time": None
     }
 
-    final_state = ada_graph.invoke(initial_state)
+
+def run_ada(filepath: str, target_col: Optional[str] = None,
+            on_step: Optional[Callable[[ADAState], None]] = None) -> ADAState:
+    """
+    Run the full pipeline and return the final state.
+
+    on_step, if given, is called with the state after every node finishes —
+    the Streamlit UI uses it to drive a real progress bar.
+    """
+    print("=" * 55)
+    print("   ADA v3.0 — Hypothesis-Driven Analysis")
+    print("   Powered by Claude AI")
+    print("=" * 55)
+
+    ada_graph = build_ada_graph()
+
+    # 8 nodes, each of which may run up to 1 + MAX_RETRIES times with an
+    # error-handler step between attempts. LangGraph's default limit of 25
+    # steps is too low for a run that retries more than once or twice.
+    config = {"recursion_limit": 8 * (1 + MAX_RETRIES) * 2 + 1}
+
+    final_state = None
+    for final_state in ada_graph.stream(initial_state(filepath, target_col),
+                                        config=config, stream_mode="values"):
+        if on_step is not None:
+            on_step(final_state)
 
     print("\n" + "=" * 55)
     print("   ADA v3.0 Complete!")
     print("=" * 55)
 
     return final_state
+
+
+# Backwards-compatible name from v2.0.
+run_ada_v2 = run_ada
