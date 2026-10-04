@@ -11,3 +11,6 @@ __pycache__/
 .ruff_cache/
 data/uploaded_*.csv
 runs/
+build/
+dist/
+*.egg-info/
