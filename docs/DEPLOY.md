@@ -1,5 +1,7 @@
 # Deploying the public demo
 
+Live instance: https://lgla6kmbujefu7glenjaqt.streamlit.app/
+
 The hosted demo runs on **Streamlit Community Cloud** (free). It deploys straight from GitHub, so
 there's nothing to build. Each visitor either runs the free offline mode or pastes their own
 Anthropic API key, so the demo never spends your credits.
