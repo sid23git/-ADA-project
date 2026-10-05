@@ -1,12 +1,12 @@
 # ADA — an AI data-science team you can audit
 
-[![CI](https://github.com/sid23git/-ADA-project/actions/workflows/ci.yml/badge.svg)](https://github.com/sid23git/-ADA-project/actions/workflows/ci.yml)
+[![CI](https://github.com/sid23git/ada-agent-team/actions/workflows/ci.yml/badge.svg)](https://github.com/sid23git/ada-agent-team/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-purple)
 ![Claude](https://img.shields.io/badge/agents-Claude%20Opus%205.5%20%2B%20Sonnet%205.5-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-**🚀 Live demo:** _coming soon — see [docs/DEPLOY.md](docs/DEPLOY.md)_ · **📄 [Example memo the agents wrote](docs/example_run/churn_memo.md)** · **📦 `pip install git+https://github.com/sid23git/-ADA-project.git`**
+**🚀 Live demo:** _coming soon — see [docs/DEPLOY.md](docs/DEPLOY.md)_ · **📄 [Example memo the agents wrote](docs/example_run/churn_memo.md)** · **📦 `pip install git+https://github.com/sid23git/ada-agent-team.git`**
 
 Give ADA a CSV and a business question ("What drives churn, and who should the retention team
 call?"). A team of AI agents investigates it the way a good analytics team would:
@@ -171,7 +171,7 @@ capped at $2.
 ### 2. Install it as a tool
 
 ```bash
-pip install "git+https://github.com/sid23git/-ADA-project.git"
+pip install "git+https://github.com/sid23git/ada-agent-team.git"
 export ANTHROPIC_API_KEY=sk-ant-...                    # Windows: set ANTHROPIC_API_KEY=...
 
 ada sales.csv "What drives repeat purchases?" --target repeat_buyer --max-cost 2
@@ -193,7 +193,7 @@ print(result.tracer.summary()["total_cost_usd"])
 ### 3. Develop on it
 
 ```bash
-git clone https://github.com/sid23git/-ADA-project.git && cd ./-ADA-project
+git clone https://github.com/sid23git/ada-agent-team.git && cd ada-agent-team
 python -m venv venv && source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env                                   # add ANTHROPIC_API_KEY for live agents

@@ -32,7 +32,7 @@ ui = ["streamlit>=1.40", "altair>=5"]
 ada = "ada.__main__:main"
 
 [project.urls]
-Repository = "https://github.com/sid23git/-ADA-project"
+Repository = "https://github.com/sid23git/ada-agent-team"
 
 [tool.setuptools.packages.find]
 include = ["ada*", "evals*"]

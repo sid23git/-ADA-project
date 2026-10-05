@@ -12,7 +12,7 @@ Anthropic API key, so the demo never spends your credits.
 
    | Field | Value |
    |---|---|
-   | Repository | `sid23git/-ADA-project` (or the new name if you renamed it) |
+   | Repository | `sid23git/ada-agent-team` |
    | Branch | `main` |
    | Main file path | `app.py` |
    | App URL | e.g. `ada-agent-team` → `https://ada-agent-team.streamlit.app` |
