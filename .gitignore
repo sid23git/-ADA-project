@@ -1,8 +1,16 @@
-﻿.env
+.env
 venv/
+.venv/
 .idea/
+.vscode/
 outputs/
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+.ruff_cache/
 data/uploaded_*.csv
+runs/
+build/
+dist/
+*.egg-info/

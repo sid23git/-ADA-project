@@ -1,0 +1,88 @@
+[
+  {
+    "scenario": "churn",
+    "completed": true,
+    "failed_tasks": 0,
+    "driver_recall": 1.0,
+    "drivers_found": [
+      "contract",
+      "monthly_charges",
+      "support_calls",
+      "tenure_months"
+    ],
+    "drivers_missed": [],
+    "false_discoveries": [],
+    "traps_caught": {},
+    "grounding_rate": 1.0,
+    "invalid_citations": 0,
+    "findings_total": 31,
+    "findings_accepted": 21,
+    "rejected_by_verification": 6,
+    "rejected_by_critic": 4,
+    "hypothesis_tests": 7,
+    "cost_usd": 0.9982,
+    "llm_calls": 30,
+    "wall_seconds": 283.0,
+    "mode": "live (re-graded)",
+    "run_dir": "runs/eval_20261004_224030_churn",
+    "passed": true
+  },
+  {
+    "scenario": "churn",
+    "completed": true,
+    "failed_tasks": 0,
+    "driver_recall": 1.0,
+    "drivers_found": [
+      "contract",
+      "monthly_charges",
+      "support_calls",
+      "tenure_months"
+    ],
+    "drivers_missed": [],
+    "false_discoveries": [],
+    "traps_caught": {},
+    "grounding_rate": 1.0,
+    "invalid_citations": 0,
+    "findings_total": 33,
+    "findings_accepted": 26,
+    "rejected_by_verification": 4,
+    "rejected_by_critic": 3,
+    "hypothesis_tests": 9,
+    "cost_usd": 0.9582,
+    "llm_calls": 25,
+    "wall_seconds": 268.1,
+    "mode": "live (re-graded)",
+    "run_dir": "runs/eval_20261004_224902_churn",
+    "passed": true
+  },
+  {
+    "scenario": "leakage",
+    "completed": true,
+    "failed_tasks": 0,
+    "driver_recall": 1.0,
+    "drivers_found": [
+      "contract",
+      "monthly_charges",
+      "support_calls",
+      "tenure_months"
+    ],
+    "drivers_missed": [],
+    "false_discoveries": [],
+    "traps_caught": {
+      "target_leakage": true
+    },
+    "grounding_rate": 1.0,
+    "invalid_citations": 0,
+    "findings_total": 30,
+    "findings_accepted": 22,
+    "rejected_by_verification": 5,
+    "rejected_by_critic": 3,
+    "hypothesis_tests": 11,
+    "cost_usd": 0.871,
+    "llm_calls": 27,
+    "wall_seconds": 249.0,
+    "mode": "live (re-graded)",
+    "run_dir": "runs/eval_20261004_224904_leakage",
+    "passed": true
+  }
+]

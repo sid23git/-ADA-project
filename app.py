@@ -1,422 +1,290 @@
-import streamlit as st
-import pandas as pd
+"""ADA — Streamlit front end for the AI data-science team."""
+
+import json
 import os
-from datetime import datetime
-from ada_graph import run_ada_v2
+import queue
+import threading
+import time
 
-# ─── Page Config ──────────────────────────────────────
-st.set_page_config(
-    page_title="ADA v2.0 — Autonomous Data Analysis Agent",
-    page_icon="🤖",
-    layout="wide"
+import altair as alt
+import anthropic
+import pandas as pd
+import streamlit as st
+
+from ada.config import (
+    LEAD_MODEL,
+    PUBLIC_DEMO,
+    PUBLIC_MAX_COST_USD,
+    PUBLIC_MAX_ROWS,
+    WORKER_MODEL,
+    Budget,
+    Settings,
 )
+from ada.offline import ScriptedClaude
+from ada.run import investigate
+from evals.scenarios import SCENARIOS, load
 
-# ─── Session State Init ───────────────────────────────
-if "pipeline_running" not in st.session_state:
-    st.session_state.pipeline_running = False
+st.set_page_config(page_title="ADA — AI Data Science Team", page_icon="🧪", layout="wide")
 
-# ─── Header ───────────────────────────────────────────
-st.title("🤖 ADA v2.0 — Autonomous Data Analysis Agent")
-st.markdown(
-    "Powered by **LangGraph multi-agent architecture**. "
-    "Upload any CSV and ADA autonomously analyzes, cleans, "
-    "models, and explains it — just like a junior data scientist."
-)
-st.divider()
+AGENT_ICONS = {"lead": "🧭", "data_quality": "🧹", "statistician": "📐", "ml_engineer": "🤖",
+               "critic": "🕵️", "reporter": "📝", "verifier": "⚖️", "system": "⚙️"}
+KIND_ICONS = {"plan": "planned", "start": "started", "tool_call": "→", "evidence": "📎",
+              "submitted": "📤", "accepted": "✅", "rejected": "❌", "demoted": "⬇️",
+              "error": "⚠️", "done": "📝", "revise": "✏️", "target": "🎯", "finish": "🏁"}
+SAMPLE = "titanic (data/sample.csv)"
 
-# ─── Sidebar ──────────────────────────────────────────
+
+def _scenario_options():
+    # Churn first: a business question is the clearest first impression.
+    return list(SCENARIOS) + [SAMPLE]
+
+
+def _load_choice(choice):
+    if choice == SAMPLE:
+        return (pd.read_csv("data/sample.csv"), "What determined who survived the Titanic, and how "
+                "confident can we be?", "Survived")
+    s = load(choice)
+    return s.df, s.question, s.target
+
+
+# ── Sidebar ─────────────────────────────────────────────────────────────────
+
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("🧪 Investigation")
+    source = st.radio("Data", ["Demo dataset", "Upload CSV"], horizontal=True)
+    if source == "Upload CSV":
+        upload = st.file_uploader("CSV file", type=["csv"])
+        df = pd.read_csv(upload) if upload else None
+        if df is not None and PUBLIC_DEMO and len(df) > PUBLIC_MAX_ROWS:
+            st.warning(f"The hosted demo analyses the first {PUBLIC_MAX_ROWS:,} rows. "
+                       "Run ADA locally for larger files.")
+            df = df.head(PUBLIC_MAX_ROWS)
+        default_q, default_target = "", None
+    else:
+        choice = st.selectbox("Dataset", _scenario_options(),
+                              help="The eval scenarios have planted ground truth — see evals/scenarios.py")
+        df, default_q, default_target = _load_choice(choice)
 
-    uploaded_file = st.file_uploader(
-        "Upload your CSV dataset",
-        type=["csv"]
-    )
+    question = st.text_area("Business question", value=default_q, height=90,
+                            placeholder="e.g. What drives churn, and who should we target?")
+    target = None
+    if df is not None:
+        options = ["(let the lead decide)"] + list(df.columns)
+        idx = options.index(default_target) if default_target in options else 0
+        picked = st.selectbox("Target column", options, index=idx)
+        target = None if picked == options[0] else picked
 
-    target_col_input = st.text_input(
-        "Target column (optional)",
-        placeholder="e.g. Survived, Price, Churn",
-        help="Leave empty and ADA will use the last column"
-    )
+    # On the hosted demo the server's own key is never used: visitors bring theirs.
+    server_key = None if PUBLIC_DEMO else os.getenv("ANTHROPIC_API_KEY")
+    mode = st.radio("Agents", ["Live — Claude", "Offline — scripted"], index=0 if server_key else 1,
+                    help="Offline mode runs the real tools, ledger, verifier and orchestration with "
+                         "rule-based stand-ins for the model. No API key, no cost, not AI.")
+    live = mode.startswith("Live")
+    user_key = ""
+    if live:
+        user_key = st.text_input(
+            "Your Anthropic API key", type="password",
+            placeholder="sk-ant-..." if not server_key else "optional — using the server's key",
+            help="Used only for this browser session's runs; never stored or logged. "
+                 "Get one at console.anthropic.com.")
+        st.caption("🔒 In live mode the dataset profile and the agents' tool results are sent to "
+                   "Anthropic's API. Use offline mode for data you cannot share.")
+    api_key = user_key.strip() or server_key
+    cap = PUBLIC_MAX_COST_USD if PUBLIC_DEMO else 10.0
+    max_cost = st.slider("Budget (USD)", 0.5, cap, min(2.0, cap), 0.5,
+                         help="Hard cap. New LLM calls stop once it is spent; you still get a memo.")
+    run = st.button("Run investigation", type="primary", use_container_width=True,
+                    disabled=df is None or not question.strip() or (live and not api_key))
+    if live and not api_key:
+        st.caption("Enter an API key, or switch to offline mode to try it free.")
+    st.caption(f"Lead / critic / reporter: `{LEAD_MODEL}` · specialists: `{WORKER_MODEL}`")
 
-    run_button = st.button(
-        "▶ Run ADA Pipeline",
-        type="primary",
-        use_container_width=True,
-        disabled=uploaded_file is None or st.session_state.pipeline_running
-    )
 
-    st.divider()
-    st.markdown("**Pipeline stages**")
-    st.markdown("1. 📂 Load Data")
-    st.markdown("2. 🔍 Exploratory Analysis")
-    st.markdown("3. 🧹 Data Cleaning")
-    st.markdown("4. 🤖 Model Training")
-    st.markdown("5. 💡 SHAP Explanation")
-    st.markdown("6. 📄 Final Report")
+st.title("ADA — an AI data-science team you can audit")
+st.markdown(
+    "A **lead** agent plans the investigation, **specialists** (data quality, statistics, ML) work "
+    "in parallel with real analysis tools, a **critic** challenges every claim, and a **reporter** "
+    "writes the memo. Every number must trace back to a computed result — code verifies it."
+)
 
-    st.divider()
-    st.markdown("**v2.0 upgrades**")
-    st.markdown("✅ LangGraph state graph")
-    st.markdown("✅ Shared agent state")
-    st.markdown("✅ Self-correction loop")
-    st.markdown("✅ Full audit trail")
+if df is not None and "result" not in st.session_state and not run:
+    c = st.columns(4)
+    c[0].metric("Rows", f"{len(df):,}")
+    c[1].metric("Columns", df.shape[1])
+    c[2].metric("Missing cells", f"{int(df.isna().sum().sum()):,}")
+    c[3].metric("Duplicate rows", f"{int(df.duplicated().sum()):,}")
+    st.dataframe(df.head(15), use_container_width=True)
 
-# ─── Main Area ────────────────────────────────────────
-if uploaded_file is None:
-    st.info("👈 Upload a CSV file from the sidebar to get started.")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("### 🏥 Healthcare")
-        st.markdown("Predict patient outcomes, identify risk factors")
-    with col2:
-        st.markdown("### 💰 Finance")
-        st.markdown("Detect fraud, predict loan defaults")
-    with col3:
-        st.markdown("### 🛒 Retail")
-        st.markdown("Predict churn, forecast sales")
 
-elif not run_button:
-    df_preview = pd.read_csv(uploaded_file)
-    uploaded_file.seek(0)
+# ── Running ─────────────────────────────────────────────────────────────────
 
-    st.subheader("📋 Dataset Preview")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Rows", df_preview.shape[0])
-    col2.metric("Columns", df_preview.shape[1])
-    col3.metric("Missing Values", int(df_preview.isnull().sum().sum()))
-    col4.metric("Numeric Columns",
-                len(df_preview.select_dtypes(include="number").columns))
+def _feed_line(e: dict) -> str:
+    icon = AGENT_ICONS.get(e["agent"], "·")
+    kind = KIND_ICONS.get(e["kind"], e["kind"])
+    return f"`{e['t']:6.1f}s` {icon} **{e['agent']}** {kind} — {e['message'][:160]}"
 
-    st.dataframe(df_preview.head(20), use_container_width=True)
-    st.caption("Showing first 20 rows. Press 'Run ADA Pipeline' to start.")
 
-else:
-    # Save uploaded file temporarily
-    temp_path = f"data/uploaded_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    with open(temp_path, "wb") as f:
-        f.write(uploaded_file.getvalue())
+if run:
+    st.session_state.pop("result", None)
+    # A client per run, never a shared global: concurrent visitors on a hosted
+    # demo must never use each other's API key.
+    client = anthropic.Anthropic(api_key=api_key) if live else ScriptedClaude()
+    events: queue.Queue = queue.Queue()
+    box: dict = {}
 
-    target = target_col_input.strip() if target_col_input.strip() else None
+    def worker():
+        try:
+            box["result"] = investigate(df, question.strip(), target=target,
+                                        settings=Settings(budget=Budget(max_cost_usd=max_cost)),
+                                        on_event=events.put, client=client)
+        except Exception as exc:  # surfaced in the UI below
+            box["error"] = exc
 
-    progress = st.progress(0)
-    status = st.status("🚀 ADA v2.0 pipeline starting...", expanded=True)
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
 
-    try:
-        st.session_state.pipeline_running = True
+    status = st.status("Team at work…", expanded=True)
+    metrics = st.empty()
+    feed = status.empty()
+    lines, counts = [], {"accepted": 0, "rejected": 0, "evidence": 0, "cost": 0.0}
+    while thread.is_alive() or not events.empty():
+        while not events.empty():
+            e = events.get()
+            if e["kind"] == "thought":
+                continue
+            lines.append(_feed_line(e))
+            if e["kind"] in ("accepted", "rejected", "evidence"):
+                counts[e["kind"]] += 1
+        feed.markdown("\n\n".join(lines[-25:]))
+        m = metrics.columns(3)
+        m[0].metric("Evidence items", counts["evidence"])
+        m[1].metric("Findings accepted", counts["accepted"])
+        m[2].metric("Findings rejected", counts["rejected"])
+        time.sleep(0.4)
 
-        with status:
-            st.write("📂 Loading dataset into LangGraph state...")
-            progress.progress(10)
+    if "error" in box:
+        status.update(label="Investigation failed", state="error")
+        st.exception(box["error"])
+        st.stop()
+    status.update(label="Investigation complete", state="complete", expanded=False)
+    st.session_state["result"] = box["result"]
+    st.session_state["offline"] = not live
 
-            st.write("🔍 Running Exploratory Data Analysis...")
-            progress.progress(25)
 
-            st.write("🧹 Cleaning data autonomously...")
-            progress.progress(45)
+# ── Results ─────────────────────────────────────────────────────────────────
 
-            st.write("🤖 Training and comparing ML models...")
-            progress.progress(65)
+result = st.session_state.get("result")
+if result is None:
+    st.stop()
 
-            st.write("💡 Computing SHAP explanations...")
-            progress.progress(80)
+ledger, summary = result.ledger, result.tracer.summary()
+findings = ledger.findings()
+accepted = [f for f in findings if f.status == "accepted"]
 
-            st.write("📄 Generating final report...")
-            progress.progress(90)
+cols = st.columns(6)
+cols[0].metric("Findings accepted", f"{len(accepted)} / {len(findings)}")
+cols[1].metric("Memo grounding", f"{result.lint.get('grounding_rate', 0):.0%}",
+               help="Share of numeric sentences whose numbers appear in the evidence they cite")
+cols[2].metric("Evidence items", len(ledger.all_evidence()))
+cols[3].metric("Hypothesis tests", len(ledger.hypothesis_tests()))
+cols[4].metric("Cost" + (" (est.)" if st.session_state.get("offline") else ""),
+               f"${summary['total_cost_usd']:.2f}")
+cols[5].metric("Wall time", f"{summary['wall_seconds']:.0f}s")
+if result.stop_reason:
+    st.caption(f"Stopped because: {result.stop_reason}")
 
-            # Run ADA v2.0
-            state = run_ada_v2(
-                filepath=temp_path,
-                target_col=target
-            )
+tabs = st.tabs(["📝 Memo", "🧾 Findings & review", "📎 Evidence ledger", "🧭 Agent timeline",
+                "💰 Trace & cost"])
 
-            progress.progress(100)
+with tabs[0]:
+    left, right = st.columns([3, 2])
+    with left:
+        st.markdown(result.memo)
+        st.download_button("Download memo (.md)", result.memo, "ada_memo.md", "text/markdown")
+    with right:
+        st.subheader("Citations")
+        for f in accepted:
+            with st.expander(f"[{f.id}] {f.claim[:70]}…" if len(f.claim) > 70 else f"[{f.id}] {f.claim}"):
+                st.markdown(f"**{f.kind}** · by `{f.agent}` · confidence {f.confidence}")
+                st.markdown(f"**Critic:** {f.critic_reason}")
+                st.markdown("**Evidence:** " + ", ".join(f"`{e}`" for e in f.evidence_ids))
+        if result.lint.get("ungrounded"):
+            st.warning("Sentences the grounding check could not verify:\n\n"
+                       + "\n".join(f"- {s}" for s in result.lint["ungrounded"]))
+        shap = os.path.join(result.run_dir, f"shap_{result.target}.png")
+        if result.target and os.path.exists(shap):
+            st.image(shap, caption="SHAP summary of the selected model")
 
-        # Check for critical errors
-        if state.get("error") and "CRITICAL" in str(state.get("error", "")):
-            status.update(label="❌ Pipeline failed", state="error")
-            st.error(f"Pipeline error: {state['error']}")
+with tabs[1]:
+    status_filter = st.radio("Show", ["All", "Accepted", "Rejected"], horizontal=True)
+    for f in findings:
+        if status_filter != "All" and f.status != status_filter.lower():
+            continue
+        icon = {"accepted": "✅", "rejected": "❌"}.get(f.status, "⏳")
+        with st.expander(f"{icon} {f.id} · {AGENT_ICONS.get(f.agent, '')} {f.agent} · {f.claim[:110]}"):
+            st.markdown(f"**Claim:** {f.claim}")
+            st.markdown(f"**Implication:** {f.implication}")
+            st.markdown(f"**Review:** {f.critic_reason}")
+            if f.checks:
+                st.dataframe(pd.DataFrame([{
+                    "check": c["check"], "result": "pass" if c["passed"] else
+                    ("FAIL" if c["blocking"] else "warning"), "detail": c["detail"]} for c in f.checks]),
+                    hide_index=True, use_container_width=True)
+
+with tabs[2]:
+    tests = ledger.hypothesis_tests()
+    if tests:
+        st.subheader("Hypothesis tests (corrected across the whole team)")
+        st.dataframe(pd.DataFrame([{
+            "id": e.id, "by": e.agent, "comparison": e.result["record"].get("comparison"),
+            "test": e.result["record"].get("test_used"), "p": e.result.get("p_value"),
+            "q (adjusted)": e.result.get("p_adjusted"),
+            e.result["record"].get("effect_name") or "effect": e.result["record"].get("effect_value"),
+            "verdict": e.result.get("verdict")} for e in tests]), hide_index=True, use_container_width=True)
+    st.subheader("All evidence")
+    ev_ids = [e.id for e in ledger.all_evidence()]
+    if ev_ids:
+        pick = st.selectbox("Evidence item", ev_ids,
+                            format_func=lambda i: f"{i} · {ledger.evidence(i).tool} · {ledger.evidence(i).agent}")
+        ev = ledger.evidence(pick)
+        st.markdown(f"**Tool:** `{ev.tool}` · **agent:** `{ev.agent}` · **args:** `{json.dumps(ev.args)}`")
+        if ev.tool == "run_python":
+            st.code(ev.result.get("code", ""), language="python")
+            st.code(ev.result.get("stdout", ""))
         else:
-            status.update(
-                label="✅ ADA v2.0 Pipeline Complete!",
-                state="complete"
-            )
+            st.json(ev.result, expanded=False)
 
-            # ─── Results Tabs ─────────────────────────────
-            tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-                "🧠 Hypotheses",
-                "📊 EDA",
-                "🧹 Cleaning",
-                "🤖 ML Results",
-                "💡 Explanation",
-                "✅ Validation",
-                "📄 Final Report",
-                "🔍 Audit Trail"
-            ])
+with tabs[3]:
+    for note in result.lead_notes:
+        action = "stops" if note["done"] or not note["tasks"] else "dispatches"
+        st.markdown(f"#### Round {note['round']} — lead {action}")
+        st.markdown(f"> {note['reasoning']}")
+        for t in note["tasks"]:
+            st.markdown(f"- {AGENT_ICONS.get(t['specialist'], '')} **{t['specialist']}**: {t['objective']}")
+    st.subheader("Specialist runs")
+    st.dataframe(pd.DataFrame([{k: (", ".join(v) if isinstance(v, list) else v) for k, v in t.items()}
+                               for t in result.task_log]), hide_index=True, use_container_width=True)
+    with st.expander("Full event log"):
+        st.dataframe(pd.DataFrame(result.tracer.events)[["t", "agent", "kind", "message"]],
+                     hide_index=True, use_container_width=True)
 
-            # Tab 1 — Hypotheses (NEW in v3.0)
-            with tab1:
-                st.subheader("🧠 Hypotheses — Formed Before Analysis")
-                st.markdown(
-                    "These hypotheses were generated **before** any "
-                    "analysis ran — based only on column names and types. "
-                    "This mimics how a real scientist thinks."
-                )
-
-                hypotheses = state.get("hypotheses" or {})
-
-                if not hypotheses:
-                    st.warning("Hypothesis agent was skipped.")
-                else:
-                    st.info(f"**Dataset identified as:** "
-                            f"{hypotheses.get('dataset_type', 'N/A')}")
-
-                    st.markdown(f"**Analysis strategy:** "
-                                f"{hypotheses.get('analysis_strategy', 'N/A')}")
-
-                    st.markdown("**Generated Hypotheses:**")
-                    for h in hypotheses.get("hypotheses", []):
-                        confidence_color = (
-                            "🟢" if h.get("confidence") == "high"
-                            else "🟡" if h.get("confidence") == "medium"
-                            else "🔴"
-                        )
-                        with st.expander(
-                                f"{confidence_color} {h['id']} — {h['hypothesis']}"
-                        ):
-                            st.markdown(f"**Confidence:** {h.get('confidence', 'N/A')}")
-                            st.markdown(f"**Reasoning:** {h.get('reasoning', 'N/A')}")
-                            st.markdown(f"**Expected evidence:** "
-                                        f"{h.get('expected_evidence', 'N/A')}")
-            # Tab 2 — EDA
-            with tab2:
-                st.subheader("Exploratory Data Analysis")
-                eda_stats = state.get("eda_stats") or {}
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Dataset Shape**")
-                    shape = eda_stats.get("shape", {})
-                    st.metric("Rows", shape.get("rows", "N/A"))
-                    st.metric("Columns", shape.get("columns", "N/A"))
-                with col2:
-                    st.markdown("**Missing Values**")
-                    missing = eda_stats.get("missing_values", {})
-                    if missing:
-                        missing_df = pd.DataFrame(
-                            list(missing.items()),
-                            columns=["Column", "Missing Count"]
-                        )
-                        st.dataframe(missing_df, use_container_width=True)
-                    else:
-                        st.success("No missing values found!")
-
-                st.markdown("**AI EDA Report**")
-                st.markdown(state.get("eda_report", ""))
-
-            # Tab 3 — Cleaning
-            with tab3:
-                st.subheader("Data Cleaning")
-                strategy = state.get("cleaning_strategy") or {}
-
-                st.markdown("**AI Reasoning**")
-                st.info(strategy.get("reasoning", "N/A"))
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    raw_df = state.get("raw_df")
-                    raw_str = f"{raw_df.shape}" if raw_df is not None else "N/A"
-                    st.metric("Original Shape", raw_str)
-                with col2:
-                    clean_df = state.get("cleaned_df")
-                    clean_str = f"{clean_df.shape}" if clean_df is not None else "N/A"
-                    st.metric("Cleaned Shape", clean_str)
-
-                if strategy.get("columns_to_drop"):
-                    st.markdown("**Columns Dropped**")
-                    st.write(strategy.get("columns_to_drop"))
-
-                if strategy.get("missing_value_strategies"):
-                    st.markdown("**Imputation Strategies Applied**")
-                    strat_df = pd.DataFrame(
-                        list(strategy["missing_value_strategies"].items()),
-                        columns=["Column", "Strategy"]
-                    )
-                    st.dataframe(strat_df, use_container_width=True)
-
-            # Tab 4 — ML Results
-            with tab4:
-                st.subheader("Machine Learning Results")
-                ml = state.get("ml_results") or {}
-                interp = ml.get("interpretation", {})
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Problem Type",
-                              ml.get("problem_type", "N/A").capitalize())
-                    st.metric("Best Model",
-                              interp.get("best_model", "N/A"))
-                with col2:
-                    st.markdown("**AI Reasoning**")
-                    st.info(interp.get("reasoning", "N/A"))
-
-                st.markdown("**Model Comparison**")
-                model_results = ml.get("model_results", {})
-                if model_results:
-                    model_df = pd.DataFrame(model_results).T
-                    st.dataframe(model_df, use_container_width=True)
-
-                if interp.get("concerns"):
-                    st.warning(f"⚠️ {interp.get('concerns')}")
-
-                if interp.get("recommendation"):
-                    st.markdown("**Next Steps**")
-                    st.success(interp.get("recommendation"))
-
-            # Tab 5 — Explanation
-            with tab5:
-                st.subheader("Model Explanation (SHAP)")
-                explain = state.get("explain_results" or {})
-                exp_interp = explain.get("interpretation", {})
-
-                if not explain:
-                    st.warning("Explanation agent was skipped due to an error.")
-                else:
-                    st.markdown("**Plain English Summary**")
-                    st.info(exp_interp.get("plain_english_summary", "N/A"))
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.markdown("**Top 3 Most Influential Features**")
-                        top_feats = exp_interp.get("top_3_features", [])
-                        for i, feat in enumerate(top_feats, 1):
-                            st.markdown(
-                                f"**{i}. {feat.get('feature', '')}** — "
-                                f"{feat.get('explanation', '')}"
-                            )
-                    with col2:
-                        st.markdown("**Feature Importance (SHAP)**")
-                        importance = explain.get("feature_importance", {})
-                        if importance:
-                            imp_df = pd.DataFrame(
-                                list(importance.items())[:10],
-                                columns=["Feature", "SHAP Importance"]
-                            )
-                            st.dataframe(imp_df, use_container_width=True)
-
-                    shap_path = "outputs/shap_summary.png"
-                    if os.path.exists(shap_path):
-                        st.markdown("**SHAP Summary Plot**")
-                        st.image(shap_path, use_container_width=True)
-
-                    if exp_interp.get("business_insight"):
-                        st.markdown("**Business Insight**")
-                        st.success(exp_interp.get("business_insight"))
-
-            # Tab 6 — Validation (NEW in v3.0)
-            with tab6:
-                st.subheader("✅ Hypothesis Validation Results")
-                st.markdown(
-                    "Each hypothesis was tested against the actual "
-                    "findings from EDA, ML, and SHAP analysis."
-                )
-
-                validation = state.get("validation_results") or {}
-
-                if not validation:
-                    st.warning("Validation agent was skipped.")
-                else:
-                    # Summary metrics
-                    results = validation.get("validation_results", [])
-                    confirmed = sum(1 for v in results
-                                    if v.get("verdict") == "CONFIRMED")
-                    rejected = sum(1 for v in results
-                                   if v.get("verdict") == "REJECTED")
-                    inconclusive = sum(1 for v in results
-                                       if v.get("verdict") == "INCONCLUSIVE")
-
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("✅ Confirmed", confirmed)
-                    col2.metric("❌ Rejected", rejected)
-                    col3.metric("⚠️ Inconclusive", inconclusive)
-
-                    st.divider()
-
-                    # Individual results
-                    for v in results:
-                        verdict = v.get("verdict", "")
-                        icon = ("✅" if verdict == "CONFIRMED"
-                                else "❌" if verdict == "REJECTED"
-                        else "⚠️")
-                        color = ("success" if verdict == "CONFIRMED"
-                                 else "error" if verdict == "REJECTED"
-                        else "warning")
-
-                        with st.expander(
-                                f"{icon} {v.get('id')} — {verdict}: "
-                                f"{v.get('hypothesis', '')[:80]}..."
-                        ):
-                            if color == "success":
-                                st.success(f"**Evidence:** {v.get('evidence', 'N/A')}")
-                            elif color == "error":
-                                st.error(f"**Evidence:** {v.get('evidence', 'N/A')}")
-                            else:
-                                st.warning(f"**Evidence:** {v.get('evidence', 'N/A')}")
-                            st.markdown(f"**Insight:** {v.get('insight', 'N/A')}")
-
-                    st.divider()
-                    st.markdown("**Overall Summary**")
-                    st.info(validation.get("overall_summary", "N/A"))
-
-                    if validation.get("most_surprising"):
-                        st.markdown("**Most Surprising Finding**")
-                        st.success(validation.get("most_surprising"))
-
-                    if validation.get("scientific_contribution"):
-                        st.markdown("**Scientific Contribution**")
-                        st.markdown(validation.get("scientific_contribution"))
-
-            # Tab 7 — Final Report
-            with tab7:
-                st.subheader("Final Report")
-                report = state.get("final_report", "")
-                st.markdown(report)
-
-                st.download_button(
-                    label="⬇️ Download Report",
-                    data=report,
-                    file_name=f"ADA_report_{datetime.now().strftime('%Y%m%d')}.txt",
-                    mime="text/plain"
-                )
-
-            # Tab 7 — Audit Trail (NEW in v2.0)
-            with tab7:
-                st.subheader("🔍 Audit Trail")
-                st.markdown(
-                    "Every decision made by every agent — "
-                    "logged automatically by LangGraph state."
-                )
-
-                audit = state.get("audit_trail", [])
-                if audit:
-                    audit_df = pd.DataFrame(audit)
-                    st.dataframe(audit_df, use_container_width=True)
-
-                    st.download_button(
-                        label="⬇️ Download Audit Trail (JSON)",
-                        data=str(audit),
-                        file_name=f"ADA_audit_{datetime.now().strftime('%Y%m%d')}.json",
-                        mime="application/json"
-                    )
-                else:
-                    st.info("No audit trail entries found.")
-
-    except Exception as e:
-        status.update(label="❌ Pipeline failed", state="error")
-        st.error(f"Error: {str(e)}")
-        st.exception(e)
-
-    finally:
-        st.session_state.pipeline_running = False
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+with tabs[4]:
+    by_agent = pd.DataFrame(summary["by_agent"]).T.reset_index(names="agent")
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        st.dataframe(by_agent, hide_index=True, use_container_width=True)
+        st.caption(f"{summary['llm_calls']} LLM calls · {summary['tool_calls']} tool calls · "
+                   f"{summary['input_tokens']:,} in / {summary['output_tokens']:,} out tokens · "
+                   f"cache hit rate {summary['cache_hit_rate']:.0%}")
+    with c2:
+        spans = pd.DataFrame([s for s in result.tracer.to_dict()["spans"]])
+        if not spans.empty:
+            spans["end"] = spans["started"] + spans["duration_s"]
+            chart = alt.Chart(spans).mark_bar(height=10).encode(
+                x=alt.X("started:Q", title="seconds since start"), x2="end:Q",
+                y=alt.Y("agent:N", title=None), color=alt.Color("kind:N", title="span"),
+                tooltip=["agent", "kind", "name", "duration_s", "cost_usd"],
+            ).properties(height=260, title="Where the time went (parallel specialists overlap)")
+            st.altair_chart(chart, use_container_width=True)
+    st.download_button("Download full trace (.json)", json.dumps(result.to_dict(), default=str, indent=2),
+                       "ada_investigation.json", "application/json")
