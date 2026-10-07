@@ -6,7 +6,7 @@
 ![Claude](https://img.shields.io/badge/agents-Claude%20Opus%205.5%20%2B%20Sonnet%205.5-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-**🚀 [Try the live demo](https://lgla6kmbujefu7glenjaqt.streamlit.app/)** (free offline mode, or bring your own API key) · **📄 [Example memo the agents wrote](docs/example_run/churn_memo.md)** · **📦 `pip install git+https://github.com/sid23git/ada-agent-team.git`**
+**🚀 [Try the live demo](https://lgla6kmbujefu7glenjaqt.streamlit.app/)** (free offline mode, or bring your own API key) · **📄 [Example memo the agents wrote](docs/example_run/churn_memo.md)** · **📦 `pip install git+https://github.com/sid23git/ada-agent-team.git`** · **📘 [Complete project guide (beginner to interview-ready)](docs/PROJECT_GUIDE.md)**
 
 Give ADA a CSV and a business question ("What drives churn, and who should the retention team
 call?"). A team of AI agents investigates it the way a good analytics team would:
